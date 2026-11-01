@@ -80,3 +80,15 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_percentage NUMERIC(5,2) DEFAULT 
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'CASH';
 
+-- Customer Feedback & Ratings
+CREATE TABLE IF NOT EXISTS order_feedback (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+    restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    comments TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_restaurant ON order_feedback(restaurant_id);
+

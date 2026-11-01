@@ -430,4 +430,57 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// POST /api/order/:id/feedback – customer submits 1-5 star review after meal
+router.post('/:id/feedback', async (req, res) => {
+  const { id: orderId } = req.params;
+  const schema = Joi.object({
+    rating: Joi.number().integer().min(1).max(5).required(),
+    comments: Joi.string().allow('', null).optional(),
+  });
+
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  const { rating, comments } = value;
+
+  try {
+    const orderRes = await db.query('SELECT id, restaurant_id, table_id, customer_id, total FROM orders WHERE id = $1', [orderId]);
+    if (orderRes.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
+
+    const order = orderRes.rows[0];
+
+    // Insert feedback
+    const feedbackRes = await db.query(
+      `INSERT INTO order_feedback (order_id, restaurant_id, rating, comments)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, rating, comments, created_at`,
+      [orderId, order.restaurant_id, rating, comments || null]
+    );
+
+    const feedback = feedbackRes.rows[0];
+
+    // Emit real-time feedback alert to admin dashboard
+    try {
+      const io = getIO();
+      io.emit('feedback:new', {
+        orderId,
+        tableId: order.table_id,
+        rating,
+        comments,
+        isCritical: rating <= 2
+      });
+    } catch (e) {
+      console.warn('Socket emit warning:', e.message);
+    }
+
+    res.status(201).json({
+      message: 'Thank you for your valuable feedback!',
+      feedback
+    });
+  } catch (err) {
+    console.error('Submit feedback error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 module.exports = router;

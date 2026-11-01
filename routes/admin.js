@@ -480,6 +480,51 @@ router.get('/analytics/overview', async (req, res) => {
   }
 });
 
+// GET /api/admin/feedback – customer ratings and reviews feed
+router.get('/feedback', async (req, res) => {
+  const { restaurantId } = req.query;
+  try {
+    const params = restaurantId ? [restaurantId] : [];
+    const query = `
+      SELECT f.id, f.rating, f.comments, f.created_at,
+             o.id AS order_id, o.total AS order_total,
+             t.number AS table_number,
+             c.name AS customer_name, c.phone AS customer_phone
+      FROM order_feedback f
+      JOIN orders o ON f.order_id = o.id
+      LEFT JOIN tables t ON o.table_id = t.id
+      LEFT JOIN customers c ON o.customer_id = c.id
+      ${restaurantId ? 'WHERE f.restaurant_id = $1' : ''}
+      ORDER BY f.created_at DESC
+    `;
+    const result = await db.query(query, params);
+
+    // Summary calculation
+    const avgQuery = `
+      SELECT 
+        COUNT(id) AS total_reviews,
+        COALESCE(ROUND(AVG(rating), 2), 0) AS average_rating
+      FROM order_feedback
+      ${restaurantId ? 'WHERE restaurant_id = $1' : ''}
+    `;
+    const avgRes = await db.query(avgQuery, params);
+
+    res.json({
+      summary: {
+        totalReviews: parseInt(avgRes.rows[0].total_reviews, 10),
+        averageRating: parseFloat(avgRes.rows[0].average_rating)
+      },
+      reviews: result.rows.map(r => ({
+        ...r,
+        order_total: parseFloat(r.order_total)
+      }))
+    });
+  } catch (err) {
+    console.error('Fetch feedback error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Legacy backward compatibility alias for summary
 router.get('/analytics/summary', async (req, res) => {
   req.url = '/analytics/overview';
