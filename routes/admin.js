@@ -594,6 +594,99 @@ router.put('/service-requests/:id/resolve', async (req, res) => {
   }
 });
 
+// GET /api/admin/reports/sales/csv – export accounting sales report as CSV spreadsheet
+router.get('/reports/sales/csv', async (req, res) => {
+  const { restaurantId, startDate, endDate } = req.query;
+
+  try {
+    const params = [];
+    let query = `
+      SELECT o.id, o.created_at, o.subtotal, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.status, o.notes,
+             t.number AS table_number,
+             c.name AS customer_name, c.phone AS customer_phone
+      FROM orders o
+      LEFT JOIN tables t ON o.table_id = t.id
+      LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE 1=1
+    `;
+
+    if (restaurantId) {
+      params.push(restaurantId);
+      query += ` AND o.restaurant_id = $${params.length}`;
+    }
+    if (startDate) {
+      params.push(startDate);
+      query += ` AND o.created_at >= $${params.length}`;
+    }
+    if (endDate) {
+      params.push(endDate);
+      query += ` AND o.created_at <= $${params.length}`;
+    }
+
+    query += ` ORDER BY o.created_at DESC`;
+
+    const result = await db.query(query, params);
+
+    // Build CSV string
+    const headers = [
+      'Order ID',
+      'Date',
+      'Time',
+      'Table Number',
+      'Customer Name',
+      'Customer Phone',
+      'Subtotal',
+      'Tax Rate (%)',
+      'Tax Amount',
+      'Grand Total',
+      'Payment Method',
+      'Status',
+      'Notes'
+    ];
+
+    const escapeCsv = (str) => {
+      if (str == null) return '';
+      const s = String(str);
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
+    const rows = result.rows.map(r => {
+      const dt = new Date(r.created_at);
+      const dateStr = dt.toISOString().split('T')[0];
+      const timeStr = dt.toTimeString().split(' ')[0];
+
+      return [
+        escapeCsv(r.id),
+        escapeCsv(dateStr),
+        escapeCsv(timeStr),
+        escapeCsv(r.table_number || 'N/A'),
+        escapeCsv(r.customer_name || 'Walk-in'),
+        escapeCsv(r.customer_phone || 'N/A'),
+        parseFloat(r.subtotal || r.total).toFixed(2),
+        parseFloat(r.tax_percentage || 5.0).toFixed(2),
+        parseFloat(r.tax_amount || 0).toFixed(2),
+        parseFloat(r.total).toFixed(2),
+        escapeCsv(r.payment_method || 'CASH'),
+        escapeCsv(r.status),
+        escapeCsv(r.notes || '')
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\r\n');
+    const filename = `sales-report-${new Date().toISOString().split('T')[0]}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csvContent);
+  } catch (err) {
+    console.error('Export CSV error:', err);
+    res.status(500).json({ error: 'Failed to generate CSV report' });
+  }
+});
+
 // Legacy backward compatibility alias for summary
 router.get('/analytics/summary', async (req, res) => {
   req.url = '/analytics/overview';
