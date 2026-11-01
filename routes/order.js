@@ -96,7 +96,8 @@ router.get('/tables/default', async (req, res) => {
       `SELECT t.id, t.number, t.restaurant_id, r.name as restaurant_name 
        FROM tables t 
        JOIN restaurants r ON t.restaurant_id = r.id 
-       ORDER BY t.created_at ASC LIMIT 1`
+       ORDER BY (SELECT COUNT(*) FROM menu_items WHERE restaurant_id = r.id) DESC, t.number ASC 
+       LIMIT 1`
     );
     if (tableRes.rowCount === 0) {
       return res.status(404).json({ error: 'No tables configured yet' });
