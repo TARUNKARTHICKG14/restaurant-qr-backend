@@ -112,3 +112,24 @@ CREATE TABLE IF NOT EXISTS service_requests (
 CREATE INDEX IF NOT EXISTS idx_service_requests_restaurant ON service_requests(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_service_requests_table ON service_requests(table_id);
 
+-- Promotional Coupons & Discounts
+CREATE TABLE IF NOT EXISTS coupons (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    discount_type TEXT NOT NULL CHECK (discount_type IN ('PERCENTAGE', 'FLAT')),
+    discount_value NUMERIC(10,2) NOT NULL,
+    min_order_amount NUMERIC(10,2) DEFAULT 0,
+    max_discount_amount NUMERIC(10,2),
+    valid_until TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    CONSTRAINT unique_restaurant_coupon UNIQUE (restaurant_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coupons_restaurant ON coupons(restaurant_id);
+
+-- Order discount tracking
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_code TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+

@@ -152,6 +152,54 @@ const swaggerDocument = {
         }
       }
     },
+    '/api/order/{id}/apply-coupon': {
+      post: {
+        summary: 'Apply a promotional discount coupon code to an order',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['code'],
+                properties: {
+                  code: { type: 'string', example: 'WELCOME10' }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: { description: 'Coupon applied and bill recalculated' }
+        }
+      }
+    },
+    '/api/order/{id}/remove-coupon': {
+      delete: {
+        summary: 'Remove applied coupon and revert bill',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        responses: {
+          200: { description: 'Coupon removed' }
+        }
+      }
+    },
+    '/api/order/{id}/split': {
+      get: {
+        summary: 'Calculate equal bill split among diners at table',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'ways', in: 'query', schema: { type: 'integer', default: 2, minimum: 2, maximum: 20 } }
+        ],
+        responses: {
+          200: { description: 'Itemized split breakdown with exact per-person amounts' }
+        }
+      }
+    },
     '/api/order/table/{tableId}/call-waiter': {
       post: {
         summary: 'Call waiter or request table assistance',
@@ -280,3 +328,4 @@ module.exports = {
   swaggerUi,
   swaggerDocument
 };
+

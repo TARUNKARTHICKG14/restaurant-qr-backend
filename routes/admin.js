@@ -687,6 +687,82 @@ router.get('/reports/sales/csv', async (req, res) => {
   }
 });
 
+// ----- Promotional Coupons Management -----
+// POST /api/admin/coupons – create discount coupon
+router.post('/coupons', async (req, res) => {
+  const schema = Joi.object({
+    restaurantId: Joi.string().uuid().required(),
+    code: Joi.string().trim().uppercase().required(),
+    discountType: Joi.string().valid('PERCENTAGE', 'FLAT').required(),
+    discountValue: Joi.number().precision(2).positive().required(),
+    minOrderAmount: Joi.number().precision(2).min(0).default(0),
+    maxDiscountAmount: Joi.number().precision(2).positive().optional(),
+    validUntil: Joi.date().iso().optional()
+  });
+
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  const {
+    restaurantId,
+    code,
+    discountType,
+    discountValue,
+    minOrderAmount,
+    maxDiscountAmount,
+    validUntil
+  } = value;
+
+  try {
+    const result = await db.query(
+      `INSERT INTO coupons (restaurant_id, code, discount_type, discount_value, min_order_amount, max_discount_amount, valid_until)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [restaurantId, code, discountType, discountValue, minOrderAmount, maxDiscountAmount || null, validUntil || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: `Coupon code '${code}' already exists for this restaurant` });
+    }
+    console.error('Create coupon error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// GET /api/admin/coupons – list coupons for a restaurant
+router.get('/coupons', async (req, res) => {
+  const { restaurantId } = req.query;
+  if (!restaurantId) return res.status(400).json({ error: 'restaurantId query parameter is required' });
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM coupons WHERE restaurant_id = $1 ORDER BY created_at DESC`,
+      [restaurantId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('List coupons error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// DELETE /api/admin/coupons/:id – deactivate coupon
+router.delete('/coupons/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await db.query(
+      `UPDATE coupons SET is_active = false WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Coupon not found' });
+    res.json({ message: 'Coupon deactivated successfully', coupon: result.rows[0] });
+  } catch (err) {
+    console.error('Deactivate coupon error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Legacy backward compatibility alias for summary
 router.get('/analytics/summary', async (req, res) => {
   req.url = '/analytics/overview';

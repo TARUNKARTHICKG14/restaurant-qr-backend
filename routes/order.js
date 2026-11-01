@@ -23,7 +23,7 @@ async function upsertCustomer({ name, phone, consentGiven }) {
   }
 }
 
-// Helper to compute subtotal, restaurant tax percentage, tax amount, and grand total
+// Helper to compute subtotal, coupon discounts, restaurant tax percentage, tax amount, and grand total
 async function recalculateOrderTotals(orderId, restaurantId) {
   // 1. Fetch restaurant tax percentage and currency
   const restRes = await db.query('SELECT tax_percentage, currency FROM restaurants WHERE id = $1', [restaurantId]);
@@ -32,25 +32,60 @@ async function recalculateOrderTotals(orderId, restaurantId) {
     : 5.0;
   const currency = restRes.rowCount > 0 && restRes.rows[0].currency ? restRes.rows[0].currency : '₹';
 
-  // 2. Compute subtotal from order_items
+  // 2. Fetch order to check for applied coupon
+  const orderRes = await db.query('SELECT coupon_code FROM orders WHERE id = $1', [orderId]);
+  const couponCode = orderRes.rowCount > 0 ? orderRes.rows[0].coupon_code : null;
+
+  // 3. Compute subtotal from order_items
   const sumRes = await db.query(
     `SELECT COALESCE(SUM(quantity * price_at_order), 0) AS subtotal 
      FROM order_items WHERE order_id = $1`,
     [orderId]
   );
   const subtotal = parseFloat(sumRes.rows[0].subtotal);
-  const taxAmount = Math.round((subtotal * (taxPercentage / 100)) * 100) / 100;
-  const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
 
-  // 3. Update orders record
+  // 4. Calculate discount if couponCode is active
+  let discountAmount = 0;
+  if (couponCode) {
+    const couponRes = await db.query(
+      `SELECT * FROM coupons 
+       WHERE restaurant_id = $1 AND code = $2 AND is_active = true 
+       AND (valid_until IS NULL OR valid_until >= now())`,
+      [restaurantId, couponCode]
+    );
+
+    if (couponRes.rowCount > 0) {
+      const coupon = couponRes.rows[0];
+      const minOrder = parseFloat(coupon.min_order_amount || 0);
+
+      if (subtotal >= minOrder) {
+        if (coupon.discount_type === 'PERCENTAGE') {
+          const rawDiscount = (subtotal * parseFloat(coupon.discount_value)) / 100;
+          const maxCap = coupon.max_discount_amount ? parseFloat(coupon.max_discount_amount) : Infinity;
+          discountAmount = Math.min(rawDiscount, maxCap);
+        } else if (coupon.discount_type === 'FLAT') {
+          discountAmount = Math.min(parseFloat(coupon.discount_value), subtotal);
+        }
+      } else {
+        discountAmount = 0;
+      }
+    }
+  }
+
+  discountAmount = Math.round(discountAmount * 100) / 100;
+  const taxableAmount = Math.max(0, subtotal - discountAmount);
+  const taxAmount = Math.round((taxableAmount * (taxPercentage / 100)) * 100) / 100;
+  const grandTotal = Math.round((taxableAmount + taxAmount) * 100) / 100;
+
+  // 5. Update orders record
   await db.query(
     `UPDATE orders 
-     SET subtotal = $1, tax_percentage = $2, tax_amount = $3, total = $4, updated_at = now() 
-     WHERE id = $5`,
-    [subtotal, taxPercentage, taxAmount, grandTotal, orderId]
+     SET subtotal = $1, discount_amount = $2, tax_percentage = $3, tax_amount = $4, total = $5, updated_at = now() 
+     WHERE id = $6`,
+    [subtotal, discountAmount, taxPercentage, taxAmount, grandTotal, orderId]
   );
 
-  return { subtotal, taxPercentage, taxAmount, grandTotal, currency };
+  return { subtotal, discountAmount, couponCode, taxPercentage, taxAmount, grandTotal, currency };
 }
 
 // GET /api/order/table/:tableId/session
@@ -68,7 +103,7 @@ router.get('/table/:tableId/session', async (req, res) => {
 
     // Find active order for this table that is NOT paid or cancelled
     const activeOrderRes = await db.query(
-      `SELECT o.id, o.restaurant_id, o.status, o.subtotal, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.notes, o.created_at, o.updated_at,
+      `SELECT o.id, o.restaurant_id, o.status, o.subtotal, o.discount_amount, o.coupon_code, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.notes, o.created_at, o.updated_at,
               c.name AS customer_name, c.phone AS customer_phone,
               r.currency
        FROM orders o
@@ -108,6 +143,8 @@ router.get('/table/:tableId/session', async (req, res) => {
       notes: order.notes,
       currency: order.currency || '₹',
       subtotal: parseFloat(order.subtotal || order.total),
+      couponCode: order.coupon_code,
+      discountAmount: parseFloat(order.discount_amount || 0),
       taxPercentage: parseFloat(order.tax_percentage || 5.0),
       taxAmount: parseFloat(order.tax_amount || 0),
       total: parseFloat(order.total),
@@ -537,6 +574,148 @@ router.post('/table/:tableId/call-waiter', async (req, res) => {
     });
   } catch (err) {
     console.error('Call waiter error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// POST /api/order/:id/apply-coupon – apply promo discount code to order
+router.post('/:id/apply-coupon', async (req, res) => {
+  const { id: orderId } = req.params;
+  const schema = Joi.object({
+    code: Joi.string().trim().uppercase().required()
+  });
+
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  const { code } = value;
+
+  try {
+    const orderRes = await db.query('SELECT id, restaurant_id, status, subtotal FROM orders WHERE id = $1', [orderId]);
+    if (orderRes.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
+
+    const order = orderRes.rows[0];
+    if (['PAID', 'CANCELLED'].includes(order.status)) {
+      return res.status(400).json({ error: `Cannot apply coupon to an order with status: ${order.status}` });
+    }
+
+    // Verify coupon in database
+    const couponRes = await db.query(
+      `SELECT * FROM coupons 
+       WHERE restaurant_id = $1 AND code = $2 AND is_active = true 
+       AND (valid_until IS NULL OR valid_until >= now())`,
+      [order.restaurant_id, code]
+    );
+
+    if (couponRes.rowCount === 0) {
+      return res.status(400).json({ error: 'Invalid or expired coupon code' });
+    }
+
+    const coupon = couponRes.rows[0];
+    const subtotal = parseFloat(order.subtotal);
+    const minOrder = parseFloat(coupon.min_order_amount || 0);
+
+    if (subtotal < minOrder) {
+      return res.status(400).json({
+        error: `Minimum order amount of ${minOrder} required to apply coupon '${code}'`
+      });
+    }
+
+    // Attach coupon code and recalculate
+    await db.query('UPDATE orders SET coupon_code = $1 WHERE id = $2', [code, orderId]);
+    const totals = await recalculateOrderTotals(orderId, order.restaurant_id);
+
+    res.json({
+      message: `Coupon '${code}' applied successfully!`,
+      coupon: {
+        code: coupon.code,
+        discountType: coupon.discount_type,
+        discountValue: parseFloat(coupon.discount_value)
+      },
+      bill: totals
+    });
+  } catch (err) {
+    console.error('Apply coupon error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// DELETE /api/order/:id/remove-coupon – remove promo coupon from order
+router.delete('/:id/remove-coupon', async (req, res) => {
+  const { id: orderId } = req.params;
+
+  try {
+    const orderRes = await db.query('SELECT id, restaurant_id, status FROM orders WHERE id = $1', [orderId]);
+    if (orderRes.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
+
+    const order = orderRes.rows[0];
+    await db.query('UPDATE orders SET coupon_code = NULL, discount_amount = 0 WHERE id = $1', [orderId]);
+    const totals = await recalculateOrderTotals(orderId, order.restaurant_id);
+
+    res.json({
+      message: 'Coupon removed successfully',
+      bill: totals
+    });
+  } catch (err) {
+    console.error('Remove coupon error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// GET /api/order/:id/split – calculate equal bill split for table diners
+router.get('/:id/split', async (req, res) => {
+  const { id: orderId } = req.params;
+  const ways = parseInt(req.query.ways, 10) || 2;
+
+  if (ways < 2 || ways > 20) {
+    return res.status(400).json({ error: 'Bill can be split between 2 and 20 ways' });
+  }
+
+  try {
+    const orderRes = await db.query(
+      `SELECT o.id, o.table_id, o.subtotal, o.discount_amount, o.coupon_code, o.tax_percentage, o.tax_amount, o.total,
+              r.currency, t.number AS table_number
+       FROM orders o
+       JOIN restaurants r ON o.restaurant_id = r.id
+       LEFT JOIN tables t ON o.table_id = t.id
+       WHERE o.id = $1`,
+      [orderId]
+    );
+
+    if (orderRes.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
+
+    const order = orderRes.rows[0];
+    const totalAmount = parseFloat(order.total);
+    const currency = order.currency || '₹';
+
+    // Split total equally in cents/paise to guarantee sum == total
+    const totalCents = Math.round(totalAmount * 100);
+    const baseShareCents = Math.floor(totalCents / ways);
+    const remainderCents = totalCents % ways;
+
+    const shares = [];
+    for (let i = 0; i < ways; i++) {
+      const shareCents = baseShareCents + (i < remainderCents ? 1 : 0);
+      shares.push({
+        person: i + 1,
+        amount: parseFloat((shareCents / 100).toFixed(2))
+      });
+    }
+
+    res.json({
+      orderId,
+      tableNumber: order.table_number,
+      currency,
+      totalAmount,
+      subtotal: parseFloat(order.subtotal),
+      discountAmount: parseFloat(order.discount_amount),
+      taxAmount: parseFloat(order.tax_amount),
+      splitWays: ways,
+      perPersonAmount: shares[0].amount,
+      shares
+    });
+  } catch (err) {
+    console.error('Split bill error:', err);
     res.status(500).json({ error: 'Database error' });
   }
 });
