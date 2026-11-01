@@ -88,6 +88,26 @@ async function recalculateOrderTotals(orderId, restaurantId) {
   return { subtotal, discountAmount, couponCode, taxPercentage, taxAmount, grandTotal, currency };
 }
 
+// GET /api/order/tables/default
+// Returns default table and restaurant for direct browser preview
+router.get('/tables/default', async (req, res) => {
+  try {
+    const tableRes = await db.query(
+      `SELECT t.id, t.number, t.restaurant_id, r.name as restaurant_name 
+       FROM tables t 
+       JOIN restaurants r ON t.restaurant_id = r.id 
+       ORDER BY t.created_at ASC LIMIT 1`
+    );
+    if (tableRes.rowCount === 0) {
+      return res.status(404).json({ error: 'No tables configured yet' });
+    }
+    res.json({ table: tableRes.rows[0] });
+  } catch (err) {
+    console.error('Default table error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // GET /api/order/table/:tableId/session
 // Checks if the table currently has an active (unpaid) order session
 router.get('/table/:tableId/session', async (req, res) => {

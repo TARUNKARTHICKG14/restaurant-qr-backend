@@ -336,3 +336,4 @@ async function runFullSimulation() {
 }
 
 runFullSimulation();
+
