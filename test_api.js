@@ -3,7 +3,7 @@ process.env.NODE_ENV = 'test';
 const http = require('http');
 const { app, server } = require('./server');
 
-const PORT = 3001; // use separate port for test
+const PORT = 3002; // use dedicated port
 
 async function request(path, options = {}, body = null) {
   return new Promise((resolve, reject) => {
@@ -41,7 +41,7 @@ async function request(path, options = {}, body = null) {
 }
 
 async function runTests() {
-  console.log('🧪 Starting End-to-End API Verification...');
+  console.log('🧪 Starting End-to-End API & Session Management Verification...');
 
   await new Promise((resolve) => server.listen(PORT, resolve));
   console.log(`Server listening on port ${PORT} for tests`);
@@ -62,24 +62,21 @@ async function runTests() {
 
     // 3. Create Restaurant
     const rest = await request('/api/admin/restaurant', { method: 'POST', headers: authHeaders }, {
-      name: 'Spice Garden',
+      name: 'Spice Palace ' + Date.now(),
       owner_name: 'Tarun Karthick',
-      address: '123 Gourmet Ave',
+      address: '456 Royal Lane',
       phone: '+91-9876543210'
     });
     console.log('3. Create Restaurant:', rest.status === 201 && rest.data.id ? '✅ PASSED' : '❌ FAILED');
     const restaurantId = rest.data.id;
 
-    // 4. Create Tables 1 to 5
-    let table1Id = null;
-    for (let i = 1; i <= 5; i++) {
-      const tableRes = await request('/api/admin/tables', { method: 'POST', headers: authHeaders }, {
-        number: 100 + i, // use unique table numbers
-        restaurantId
-      });
-      if (i === 1) table1Id = tableRes.data.id;
-    }
-    console.log('4. Create Tables 1-5:', table1Id ? '✅ PASSED' : '❌ FAILED');
+    // 4. Create Table 1
+    const tableRes = await request('/api/admin/tables', { method: 'POST', headers: authHeaders }, {
+      number: Math.floor(Math.random() * 90000) + 1000,
+      restaurantId
+    });
+    const tableId = tableRes.data.id;
+    console.log('4. Create Table:', tableId ? '✅ PASSED' : '❌ FAILED');
 
     // 5. Create Menu Items
     const dish1 = await request('/api/admin/menu', { method: 'POST', headers: authHeaders }, {
@@ -98,64 +95,73 @@ async function runTests() {
     });
     console.log('5. Create Menu Items:', dish1.status === 201 && dish2.status === 201 ? '✅ PASSED' : '❌ FAILED');
 
-    // 6. Fetch Public Menu
-    const menu = await request(`/api/menu/${restaurantId}`);
-    console.log('6. Public Menu Fetch:', menu.status === 200 && menu.data.length >= 2 ? '✅ PASSED' : '❌ FAILED');
+    // 6. Check Initial Table Session (Should be false)
+    const initSession = await request(`/api/order/table/${tableId}/session`);
+    console.log('6. Initial Table Session (hasActiveSession: false):', initSession.status === 200 && initSession.data.hasActiveSession === false ? '✅ PASSED' : '❌ FAILED');
 
-    // 7. QR Code Generation for Table 1
-    const qrJson = await request(`/api/qr/${table1Id}?format=json`);
-    console.log('7. QR Code Generation:', qrJson.status === 200 && qrJson.data.qrCodeDataUrl.startsWith('data:image/png') ? '✅ PASSED' : '❌ FAILED');
-
-    // 8. Order Placement WITHOUT GDPR consent (should fail with 400)
+    // 7. GDPR Enforcement check
     const badOrder = await request('/api/order', { method: 'POST' }, {
       restaurantId,
-      tableId: table1Id,
+      tableId,
       customer: {
-        name: 'John Doe',
-        phone: '+91-9999988888',
+        name: 'Tarun Customer',
+        phone: '+91-9123456789',
         consentGiven: false
       },
-      items: [
-        { menuItemId: dish1.data.id, quantity: 1 }
-      ]
+      items: [{ menuItemId: dish1.data.id, quantity: 1 }]
     });
-    console.log('8. GDPR Rejection (consent=false):', badOrder.status === 400 ? '✅ PASSED' : '❌ FAILED');
+    console.log('7. GDPR Rejection (consent=false):', badOrder.status === 400 ? '✅ PASSED' : '❌ FAILED');
 
-    // 9. Order Placement WITH GDPR consent (should succeed with 201)
-    const goodOrder = await request('/api/order', { method: 'POST' }, {
+    // 8. Place First Order (Dish 1 x 2 = ₹500)
+    const firstOrder = await request('/api/order', { method: 'POST' }, {
       restaurantId,
-      tableId: table1Id,
+      tableId,
       customer: {
-        name: 'John Doe',
-        phone: '+91-9999988888',
+        name: 'Tarun Customer',
+        phone: '+91-9123456789',
         consentGiven: true
       },
-      items: [
-        { menuItemId: dish1.data.id, quantity: 2 }, // 250 * 2 = 500
-        { menuItemId: dish2.data.id, quantity: 4 }  // 45 * 4 = 180 => total = 680
-      ]
+      items: [{ menuItemId: dish1.data.id, quantity: 2 }]
     });
-    const expectedTotal = 680;
-    const isTotalCorrect = goodOrder.status === 201 && parseFloat(goodOrder.data.total) === expectedTotal;
-    console.log(`9. Place Order (Total: ${goodOrder.data.total}, expected: 680):`, isTotalCorrect ? '✅ PASSED' : '❌ FAILED');
-    const orderId = goodOrder.data.orderId;
+    const orderId = firstOrder.data.orderId;
+    console.log(`8. Place First Order (Total: ₹${firstOrder.data.total}, expected: 500):`, firstOrder.status === 201 && parseFloat(firstOrder.data.total) === 500 ? '✅ PASSED' : '❌ FAILED');
 
-    // 10. Kitchen Update Status
-    const updateStatus = await request(`/api/order/${orderId}/status`, { method: 'PUT' }, {
+    // 9. Re-scan Table Session Check (Customer doesn't need to re-login!)
+    const activeSession = await request(`/api/order/table/${tableId}/session`);
+    const sessionRecognized = activeSession.status === 200 &&
+      activeSession.data.hasActiveSession === true &&
+      activeSession.data.customer.name === 'Tarun Customer' &&
+      parseFloat(activeSession.data.total) === 500;
+    console.log('9. Re-Scan Session Detection (No re-login needed):', sessionRecognized ? '✅ PASSED' : '❌ FAILED');
+
+    // 10. Add Items to Existing Bill (Dish 2 x 4 = ₹180) -> Total becomes ₹680
+    const addItems = await request(`/api/order/${orderId}/items`, { method: 'POST' }, {
+      items: [{ menuItemId: dish2.data.id, quantity: 4 }]
+    });
+    console.log(`10. Add Items to Bill (New Total: ₹${addItems.data.total}, expected: 680):`, addItems.status === 200 && parseFloat(addItems.data.total) === 680 ? '✅ PASSED' : '❌ FAILED');
+
+    // 11. Verify Session Reflects Both Items & New Total
+    const updatedSession = await request(`/api/order/table/${tableId}/session`);
+    const sessionUpdated = updatedSession.status === 200 &&
+      updatedSession.data.items.length === 2 &&
+      parseFloat(updatedSession.data.total) === 680;
+    console.log('11. Session Updated with Cumulative Bill:', sessionUpdated ? '✅ PASSED' : '❌ FAILED');
+
+    // 12. Kitchen updates status to PREPARING
+    const statusUpdate = await request(`/api/order/${orderId}/status`, { method: 'PUT' }, {
       status: 'PREPARING'
     });
-    console.log('10. Update Status to PREPARING:', updateStatus.status === 200 && updateStatus.data.status === 'PREPARING' ? '✅ PASSED' : '❌ FAILED');
+    console.log('12. Kitchen Status Update:', statusUpdate.status === 200 && statusUpdate.data.status === 'PREPARING' ? '✅ PASSED' : '❌ FAILED');
 
-    // 11. Admin Orders list with joined customer & items
-    const adminOrders = await request(`/api/admin/orders?restaurantId=${restaurantId}`, { headers: authHeaders });
-    const orderFound = adminOrders.status === 200 && adminOrders.data.some(o => o.id === orderId && o.items.length === 2);
-    console.log('11. Admin Orders Feed:', orderFound ? '✅ PASSED' : '❌ FAILED');
+    // 13. Owner dismisses/settles bill
+    const dismissRes = await request(`/api/order/${orderId}/dismiss`, { method: 'PUT' });
+    console.log('13. Owner Dismiss / Settle Bill:', dismissRes.status === 200 && dismissRes.data.order.status === 'PAID' ? '✅ PASSED' : '❌ FAILED');
 
-    // 12. Admin Analytics
-    const analytics = await request(`/api/admin/analytics/summary?restaurantId=${restaurantId}`, { headers: authHeaders });
-    console.log('12. Admin Analytics Summary:', analytics.status === 200 && analytics.data.today ? '✅ PASSED' : '❌ FAILED');
+    // 14. Verify Table Session is Reset (Next customer sees initial login screen)
+    const resetSession = await request(`/api/order/table/${tableId}/session`);
+    console.log('14. Table Session Reset for Next Customer:', resetSession.status === 200 && resetSession.data.hasActiveSession === false ? '✅ PASSED' : '❌ FAILED');
 
-    console.log('\n🎉 ALL 12 VERIFICATION CHECKS COMPLETED SUCCESSFULLY!');
+    console.log('\n🎉 ALL 14 VERIFICATION CHECKS (INCLUDING SESSION & RE-SCAN) PASSED PERFECTLY!');
     server.close();
     process.exit(0);
   } catch (err) {

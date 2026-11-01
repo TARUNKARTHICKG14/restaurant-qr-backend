@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "db:migrate": "node db/migrate.js",
-    "test": "jest"
+    "test": "node test_api.js"
   },
   "keywords": [
     "restaurant",

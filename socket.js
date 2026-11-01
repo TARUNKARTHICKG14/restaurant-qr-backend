@@ -37,3 +37,4 @@ function getIO() {
 }
 
 module.exports = { initSocket, getIO };
+
