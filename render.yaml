@@ -27,3 +27,4 @@ services:
       - key: ADMIN_PASS
         sync: false
     healthCheckPath: /health
+
