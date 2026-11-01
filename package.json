@@ -1,0 +1,37 @@
+{
+  "name": "restaurant-qr-backend",
+  "version": "1.0.0",
+  "description": "Backend API for QR-code based restaurant table ordering system with PostgreSQL and Realtime updates.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "db:migrate": "node db/migrate.js",
+    "test": "jest"
+  },
+  "keywords": [
+    "restaurant",
+    "qr-code",
+    "ordering-system",
+    "express",
+    "postgresql",
+    "socket.io"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "joi": "^17.13.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.0",
+    "supertest": "^7.1.0"
+  }
+}
