@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
     description TEXT,
     price NUMERIC(10,2) NOT NULL,
     photo_url TEXT,
+    category TEXT DEFAULT 'Main Course',
     available BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS orders (
     table_id UUID REFERENCES tables(id) ON DELETE SET NULL,
     customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
     status order_status NOT NULL DEFAULT 'PENDING',
+    notes TEXT,
     total NUMERIC(10,2) NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
@@ -67,4 +69,8 @@ CREATE TABLE IF NOT EXISTS order_items (
 CREATE INDEX IF NOT EXISTS idx_orders_restaurant ON orders(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_orders_table ON orders(table_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+
+-- Backward-compatible column additions for existing installations
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Main Course';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT;
 

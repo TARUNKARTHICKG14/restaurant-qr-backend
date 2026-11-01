@@ -16,11 +16,13 @@ const menuRoutes = require('./routes/menu');
 const orderRoutes = require('./routes/order');
 const adminRoutes = require('./routes/admin');
 const qrRoutes = require('./routes/qr');
+const kitchenRoutes = require('./routes/kitchen');
 
 app.use('/api/menu', menuRoutes);
 app.use('/api/order', orderRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/qr', qrRoutes);
+app.use('/api/kitchen', kitchenRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

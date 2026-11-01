@@ -129,7 +129,7 @@ router.put('/tables/:id', async (req, res) => {
 // ----- MenuItem CRUD -----
 router.get('/menu/:restaurantId', async (req, res) => {
   const { restaurantId } = req.params;
-  const result = await db.query('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY name', [restaurantId]);
+  const result = await db.query('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY category ASC, name ASC', [restaurantId]);
   res.json(result.rows);
 });
 
@@ -138,17 +138,18 @@ router.post('/menu', async (req, res) => {
     restaurantId: Joi.string().uuid().required(),
     name: Joi.string().required(),
     description: Joi.string().optional(),
+    category: Joi.string().default('Main Course'),
     price: Joi.number().precision(2).required(),
     photoUrl: Joi.string().uri().optional(),
-    available: Joi.boolean().optional(),
+    available: Joi.boolean().default(true),
   });
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ error: error.details[0].message });
-  const { restaurantId, name, description, price, photoUrl, available } = value;
+  const { restaurantId, name, description, category, price, photoUrl, available } = value;
   const result = await db.query(
-    `INSERT INTO menu_items (restaurant_id, name, description, price, photo_url, available)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [restaurantId, name, description, price, photoUrl, available]
+    `INSERT INTO menu_items (restaurant_id, name, description, category, price, photo_url, available)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [restaurantId, name, description, category, price, photoUrl, available]
   );
   res.status(201).json(result.rows[0]);
 });
@@ -158,6 +159,7 @@ router.put('/menu/:id', async (req, res) => {
   const schema = Joi.object({
     name: Joi.string().optional(),
     description: Joi.string().optional(),
+    category: Joi.string().optional(),
     price: Joi.number().precision(2).optional(),
     photoUrl: Joi.string().uri().optional(),
     available: Joi.boolean().optional(),
@@ -179,6 +181,34 @@ router.put('/menu/:id', async (req, res) => {
   const result = await db.query(query, values);
   if (result.rowCount === 0) return res.status(404).json({ error: 'Menu item not found' });
   res.json(result.rows[0]);
+});
+
+// Fast one-click availability toggle with real-time broadcast to all table clients
+router.put('/menu/:id/toggle-availability', async (req, res) => {
+  const { id } = req.params;
+  const result = await db.query(
+    `UPDATE menu_items 
+     SET available = NOT available 
+     WHERE id = $1 
+     RETURNING id, restaurant_id, name, available`,
+    [id]
+  );
+  if (result.rowCount === 0) return res.status(404).json({ error: 'Menu item not found' });
+  
+  const updatedItem = result.rows[0];
+
+  // Broadcast out-of-stock / restocked update to all table apps
+  try {
+    const { getIO } = require('../socket');
+    getIO().emit('menu:availability_changed', updatedItem);
+  } catch (e) {
+    console.warn('Socket broadcast warning:', e.message);
+  }
+
+  res.json({
+    message: `Menu item '${updatedItem.name}' is now ${updatedItem.available ? 'AVAILABLE' : 'UNAVAILABLE'}`,
+    item: updatedItem
+  });
 });
 
 router.delete('/menu/:id', async (req, res) => {

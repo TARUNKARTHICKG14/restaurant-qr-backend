@@ -95,6 +95,7 @@ router.post('/', async (req, res) => {
       phone: Joi.string().required(),
       consentGiven: Joi.boolean().required(),
     }).optional(),
+    notes: Joi.string().allow('', null).optional(),
     items: Joi.array()
       .items(
         Joi.object({
@@ -107,7 +108,7 @@ router.post('/', async (req, res) => {
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ error: error.details[0].message });
 
-  const { restaurantId, tableId, customer, items } = value;
+  const { restaurantId, tableId, customer, items, notes } = value;
 
   try {
     const [restRes, tableRes] = await Promise.all([
@@ -140,9 +141,9 @@ router.post('/', async (req, res) => {
       const customerId = await upsertCustomer(customer);
 
       const orderRes = await db.query(
-        `INSERT INTO orders (restaurant_id, table_id, customer_id, status, total)
-         VALUES ($1, $2, $3, 'PENDING', 0) RETURNING id, status, total, created_at`,
-        [restaurantId, tableId, customerId]
+        `INSERT INTO orders (restaurant_id, table_id, customer_id, status, notes, total)
+         VALUES ($1, $2, $3, 'PENDING', $4, 0) RETURNING id, status, total, created_at`,
+        [restaurantId, tableId, customerId, notes || null]
       );
       orderId = orderRes.rows[0].id;
     }
