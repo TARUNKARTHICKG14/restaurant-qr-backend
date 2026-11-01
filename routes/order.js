@@ -483,4 +483,62 @@ router.post('/:id/feedback', async (req, res) => {
   }
 });
 
+// POST /api/order/table/:tableId/call-waiter – customer calls waiter / requests assistance
+router.post('/table/:tableId/call-waiter', async (req, res) => {
+  const { tableId } = req.params;
+  const schema = Joi.object({
+    requestType: Joi.string()
+      .valid('CALL_WAITER', 'WATER', 'BILL', 'CUTLERY', 'CLEAN_TABLE', 'CUSTOM')
+      .default('CALL_WAITER'),
+    note: Joi.string().allow('', null).optional()
+  });
+
+  const { error, value } = schema.validate(req.body || {});
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  const { requestType, note } = value;
+
+  try {
+    const tableRes = await db.query('SELECT id, number, restaurant_id FROM tables WHERE id = $1', [tableId]);
+    if (tableRes.rowCount === 0) return res.status(404).json({ error: 'Table not found' });
+
+    const table = tableRes.rows[0];
+
+    const insertRes = await db.query(
+      `INSERT INTO service_requests (restaurant_id, table_id, request_type, status)
+       VALUES ($1, $2, $3, 'PENDING')
+       RETURNING id, request_type, status, created_at`,
+      [table.restaurant_id, table.id, note ? `${requestType}: ${note}` : requestType]
+    );
+
+    const serviceRequest = insertRes.rows[0];
+
+    // Emit real-time notification to waiter / captain / cashier
+    try {
+      const io = getIO();
+      io.emit('waiter:call', {
+        requestId: serviceRequest.id,
+        tableId: table.id,
+        tableNumber: table.number,
+        requestType: serviceRequest.request_type,
+        createdAt: serviceRequest.created_at,
+        playChime: true
+      });
+    } catch (e) {
+      console.warn('Socket emit warning:', e.message);
+    }
+
+    res.status(201).json({
+      message: `Waiter notified for Table ${table.number}. Someone will assist you shortly!`,
+      request: {
+        ...serviceRequest,
+        tableNumber: table.number
+      }
+    });
+  } catch (err) {
+    console.error('Call waiter error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 module.exports = router;

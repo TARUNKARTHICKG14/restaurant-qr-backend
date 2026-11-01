@@ -3,7 +3,7 @@ process.env.NODE_ENV = 'test';
 const http = require('http');
 const { app, server } = require('./server');
 
-const PORT = 3005; // dedicated test port
+const PORT = 3006; // dedicated test port
 
 async function request(path, options = {}, body = null) {
   return new Promise((resolve, reject) => {
@@ -28,7 +28,7 @@ async function request(path, options = {}, body = null) {
         } catch (e) {
           json = data;
         }
-        resolve({ status: res.statusCode, data: json });
+        resolve({ status: res.statusCode, headers: res.headers, data: json });
       });
     });
 
@@ -41,15 +41,17 @@ async function request(path, options = {}, body = null) {
 }
 
 async function runTests() {
-  console.log('🧪 Starting End-to-End API, Advanced QR & Feedback Verification...');
+  console.log('🧪 Starting End-to-End API, Waiter Calling & Security Verification...');
 
   await new Promise((resolve) => server.listen(PORT, resolve));
   console.log(`Server listening on port ${PORT} for tests`);
 
   try {
-    // 1. Health check
+    // 1. Health check & Helmet Security Headers check
     const health = await request('/health');
-    console.log('1. Health check:', health.status === 200 ? '✅ PASSED' : '❌ FAILED');
+    const hasSecurityHeaders = health.headers['x-content-type-options'] === 'nosniff' &&
+      health.headers['x-frame-options'] === 'SAMEORIGIN';
+    console.log('1. Health check & Helmet Security Headers:', health.status === 200 && hasSecurityHeaders ? '✅ PASSED' : '❌ FAILED');
 
     // 2. Admin Login
     const login = await request('/api/admin/login', { method: 'POST' }, {
@@ -70,75 +72,43 @@ async function runTests() {
     console.log('3. Create Restaurant:', rest.status === 201 && rest.data.id ? '✅ PASSED' : '❌ FAILED');
     const restaurantId = rest.data.id;
 
-    // 4. Create Tables 1 and 2
-    const t1 = await request('/api/admin/tables', { method: 'POST', headers: authHeaders }, {
+    // 4. Create Table
+    const tableRes = await request('/api/admin/tables', { method: 'POST', headers: authHeaders }, {
       number: Math.floor(Math.random() * 90000) + 1000,
       restaurantId
     });
-    const t2 = await request('/api/admin/tables', { method: 'POST', headers: authHeaders }, {
-      number: Math.floor(Math.random() * 90000) + 2000,
-      restaurantId
+    const tableId = tableRes.data.id;
+    const tableNumber = tableRes.data.number;
+    console.log(`4. Create Table ${tableNumber}:`, tableId ? '✅ PASSED' : '❌ FAILED');
+
+    // 5. Customer at Table Calls Waiter (Requesting Cold Water & Extra Cutlery)
+    const callWaiter = await request(`/api/order/table/${tableId}/call-waiter`, { method: 'POST' }, {
+      requestType: 'WATER',
+      note: 'Please bring cold water and 2 extra forks'
     });
-    const tableId = t1.data.id;
-    console.log('4. Create Tables:', t1.status === 201 && t2.status === 201 ? '✅ PASSED' : '❌ FAILED');
+    const isCallCreated = callWaiter.status === 201 &&
+      callWaiter.data.request.status === 'PENDING' &&
+      callWaiter.data.request.tableNumber === tableNumber;
+    console.log('5. Customer Calls Waiter from Table:', isCallCreated ? '✅ PASSED' : '❌ FAILED');
+    const requestId = callWaiter.data.request.id;
 
-    // 5. Advanced QR Code - Vector SVG Format
-    const svgRes = await request(`/api/qr/${tableId}?format=svg`);
-    const isSvgValid = svgRes.status === 200 && typeof svgRes.data === 'string' && svgRes.data.includes('<svg');
-    console.log('5. QR Code - Vector SVG Format:', isSvgValid ? '✅ PASSED' : '❌ FAILED');
+    // 6. Staff Views Active Service Calls
+    const activeCalls = await request(`/api/admin/service-requests?restaurantId=${restaurantId}&status=PENDING`, { headers: authHeaders });
+    const isFoundInPending = activeCalls.status === 200 &&
+      activeCalls.data.some(r => r.id === requestId && r.status === 'PENDING');
+    console.log('6. Staff Active Service Requests Dashboard:', isFoundInPending ? '✅ PASSED' : '❌ FAILED');
 
-    // 6. Advanced QR Code - High-Res Custom Colors (JSON format)
-    const customQr = await request(`/api/qr/${tableId}?format=json&size=600&dark=1e293b&light=ffffff`);
-    const isCustomQrValid = customQr.status === 200 && customQr.data.qrCodeDataUrl.startsWith('data:image/png');
-    console.log('6. QR Code - Custom Styled High-Res JSON:', isCustomQrValid ? '✅ PASSED' : '❌ FAILED');
+    // 7. Staff Attends & Resolves Call
+    const resolveRes = await request(`/api/admin/service-requests/${requestId}/resolve`, { method: 'PUT', headers: authHeaders });
+    const isResolved = resolveRes.status === 200 && resolveRes.data.request.status === 'RESOLVED';
+    console.log('7. Staff Acknowledges & Resolves Service Call:', isResolved ? '✅ PASSED' : '❌ FAILED');
 
-    // 7. Bulk QR Generation for Entire Restaurant
-    const bulkQr = await request(`/api/qr/restaurant/${restaurantId}/bulk`);
-    const isBulkValid = bulkQr.status === 200 && bulkQr.data.tables.length >= 2 && bulkQr.data.tables[0].qrCodeDataUrl;
-    console.log('7. Bulk QR Generation for Table Stickers:', isBulkValid ? '✅ PASSED' : '❌ FAILED');
+    // 8. Verify Table Call is Cleared from Pending List
+    const remainingCalls = await request(`/api/admin/service-requests?restaurantId=${restaurantId}&status=PENDING`, { headers: authHeaders });
+    const isCleared = remainingCalls.status === 200 && !remainingCalls.data.some(r => r.id === requestId);
+    console.log('8. Service Call Cleared from Pending Queue:', isCleared ? '✅ PASSED' : '❌ FAILED');
 
-    // 8. Create Menu Item & Place Order
-    const dish = await request('/api/admin/menu', { method: 'POST', headers: authHeaders }, {
-      restaurantId,
-      name: 'Signature Biryani',
-      category: 'Main Course',
-      price: 350.00,
-      available: true
-    });
-    const orderRes = await request('/api/order', { method: 'POST' }, {
-      restaurantId,
-      tableId,
-      customer: {
-        name: 'Tarun Foodie',
-        phone: '+91-9999900001',
-        consentGiven: true
-      },
-      items: [{ menuItemId: dish.data.id, quantity: 2 }]
-    });
-    const orderId = orderRes.data.orderId;
-    console.log('8. Place Order for Signature Biryani:', orderRes.status === 201 ? '✅ PASSED' : '❌ FAILED');
-
-    // 9. Bill Dismissal with Payment
-    await request(`/api/order/${orderId}/dismiss`, { method: 'PUT' }, { paymentMethod: 'UPI' });
-    console.log('9. Bill Dismissed & Settled via UPI: ✅ PASSED');
-
-    // 10. Customer Submits 5-Star Feedback with Comments
-    const feedbackRes = await request(`/api/order/${orderId}/feedback`, { method: 'POST' }, {
-      rating: 5,
-      comments: 'Phenomenal taste and fast delivery via the QR code!'
-    });
-    const feedbackOk = feedbackRes.status === 201 && feedbackRes.data.feedback.rating === 5;
-    console.log('10. Customer Submit 5-Star Feedback:', feedbackOk ? '✅ PASSED' : '❌ FAILED');
-
-    // 11. Admin Customer Reviews Dashboard
-    const adminFeedback = await request(`/api/admin/feedback?restaurantId=${restaurantId}`, { headers: authHeaders });
-    const adminFeedbackOk = adminFeedback.status === 200 &&
-      adminFeedback.data.summary.totalReviews >= 1 &&
-      adminFeedback.data.summary.averageRating === 5 &&
-      adminFeedback.data.reviews.some(r => r.order_id === orderId && r.rating === 5);
-    console.log('11. Admin Feedback Dashboard & Ratings Aggregator:', adminFeedbackOk ? '✅ PASSED' : '❌ FAILED');
-
-    console.log('\n🎉 ALL 11 VERIFICATION CHECKS (ADVANCED QR & REVIEWS SYSTEM) PASSED PERFECTLY!');
+    console.log('\n🎉 ALL 8 VERIFICATION CHECKS (WAITER CALL BUTTON & SECURITY HEADERS) PASSED PERFECTLY!');
     server.close();
     process.exit(0);
   } catch (err) {

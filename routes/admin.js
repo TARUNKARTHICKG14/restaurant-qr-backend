@@ -525,6 +525,75 @@ router.get('/feedback', async (req, res) => {
   }
 });
 
+// ----- Waiter Calls & Table Service Management -----
+// GET /api/admin/service-requests – view active table assistance calls
+router.get('/service-requests', async (req, res) => {
+  const { restaurantId, status } = req.query;
+  try {
+    const params = [];
+    let query = `
+      SELECT sr.id, sr.request_type, sr.status, sr.created_at, sr.resolved_at,
+             t.number AS table_number, t.id AS table_id,
+             ROUND(EXTRACT(EPOCH FROM (now() - sr.created_at)) / 60) AS elapsed_minutes
+      FROM service_requests sr
+      JOIN tables t ON sr.table_id = t.id
+      WHERE 1=1
+    `;
+    if (restaurantId) {
+      params.push(restaurantId);
+      query += ` AND sr.restaurant_id = $${params.length}`;
+    }
+    if (status) {
+      params.push(status);
+      query += ` AND sr.status = $${params.length}`;
+    } else {
+      query += ` AND sr.status IN ('PENDING', 'ATTENDED')`;
+    }
+    query += ` ORDER BY sr.created_at ASC`;
+
+    const result = await db.query(query, params);
+    res.json(result.rows.map(r => ({
+      ...r,
+      elapsed_minutes: parseInt(r.elapsed_minutes, 10) || 0
+    })));
+  } catch (err) {
+    console.error('Fetch service requests error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// PUT /api/admin/service-requests/:id/resolve – staff acknowledges/resolves call
+router.put('/service-requests/:id/resolve', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await db.query(
+      `UPDATE service_requests 
+       SET status = 'RESOLVED', resolved_at = now() 
+       WHERE id = $1 
+       RETURNING id, table_id, request_type, status, resolved_at`,
+      [id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Service request not found' });
+
+    const resolved = result.rows[0];
+
+    try {
+      const { getIO } = require('../socket');
+      getIO().emit('waiter:resolved', { requestId: id, tableId: resolved.table_id });
+    } catch (e) {
+      console.warn('Socket emit warning:', e.message);
+    }
+
+    res.json({
+      message: 'Service request marked as RESOLVED',
+      request: resolved
+    });
+  } catch (err) {
+    console.error('Resolve service request error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Legacy backward compatibility alias for summary
 router.get('/analytics/summary', async (req, res) => {
   req.url = '/analytics/overview';

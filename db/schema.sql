@@ -92,3 +92,23 @@ CREATE TABLE IF NOT EXISTS order_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_feedback_restaurant ON order_feedback(restaurant_id);
 
+-- Waiter Assistance & Table Service Calls
+DO $$ BEGIN
+    CREATE TYPE service_request_status AS ENUM ('PENDING', 'ATTENDED', 'RESOLVED');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS service_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+    table_id UUID REFERENCES tables(id) ON DELETE CASCADE,
+    request_type TEXT NOT NULL,
+    status service_request_status NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    resolved_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_requests_restaurant ON service_requests(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_service_requests_table ON service_requests(table_id);
+
