@@ -218,12 +218,41 @@ router.delete('/menu/:id', async (req, res) => {
   res.json({ message: 'Deleted', item: result.rows[0] });
 });
 
+// PUT /api/admin/restaurant/:id/tax – configure restaurant tax percentage & currency
+router.put('/restaurant/:id/tax', async (req, res) => {
+  const { id } = req.params;
+  const schema = Joi.object({
+    taxPercentage: Joi.number().precision(2).min(0).max(100).required(),
+    currency: Joi.string().default('₹')
+  });
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  try {
+    const result = await db.query(
+      `UPDATE restaurants 
+       SET tax_percentage = $1, currency = $2 
+       WHERE id = $3 
+       RETURNING id, name, tax_percentage, currency`,
+      [value.taxPercentage, value.currency, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Restaurant not found' });
+    res.json({
+      message: 'Restaurant tax settings updated successfully',
+      restaurant: result.rows[0]
+    });
+  } catch (err) {
+    console.error('Update tax settings error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // ----- Orders Management (Admin / Kitchen) -----
 router.get('/orders', async (req, res) => {
   const { status, restaurantId } = req.query;
   try {
     let query = `
-      SELECT o.id, o.restaurant_id, o.status, o.total, o.created_at, o.updated_at,
+      SELECT o.id, o.restaurant_id, o.status, o.subtotal, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.notes, o.created_at, o.updated_at,
              t.number AS table_number, t.id AS table_id,
              c.name AS customer_name, c.phone AS customer_phone,
              COALESCE(
@@ -232,7 +261,8 @@ router.get('/orders', async (req, res) => {
                    'id', oi.id,
                    'quantity', oi.quantity,
                    'price', oi.price_at_order,
-                   'item_name', mi.name
+                   'item_name', mi.name,
+                   'category', mi.category
                  )
                ) FILTER (WHERE oi.id IS NOT NULL), '[]'
              ) AS items
@@ -262,56 +292,198 @@ router.get('/orders', async (req, res) => {
   }
 });
 
-// ----- Analytics Dashboard -----
-router.get('/analytics/summary', async (req, res) => {
+// ----- Customer Directory & Order History -----
+// GET /api/admin/customers – list all customers with visit count & lifetime spending
+router.get('/customers', async (req, res) => {
+  const { restaurantId } = req.query;
+  try {
+    const params = restaurantId ? [restaurantId] : [];
+    const query = `
+      SELECT c.id, c.name, c.phone, c.consent_given, c.created_at AS first_seen,
+             COUNT(DISTINCT o.id) AS total_orders,
+             COALESCE(SUM(o.total), 0) AS lifetime_spend,
+             MAX(o.created_at) AS last_visit
+      FROM customers c
+      JOIN orders o ON c.id = o.customer_id
+      ${restaurantId ? 'WHERE o.restaurant_id = $1' : ''}
+      GROUP BY c.id
+      ORDER BY lifetime_spend DESC
+    `;
+    const result = await db.query(query, params);
+    res.json(result.rows.map(r => ({
+      ...r,
+      total_orders: parseInt(r.total_orders, 10),
+      lifetime_spend: parseFloat(r.lifetime_spend)
+    })));
+  } catch (err) {
+    console.error('Customer list error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// GET /api/admin/customers/:id/history – full order history for a single customer
+router.get('/customers/:id/history', async (req, res) => {
+  const { id: customerId } = req.params;
+  try {
+    const custRes = await db.query('SELECT * FROM customers WHERE id = $1', [customerId]);
+    if (custRes.rowCount === 0) return res.status(404).json({ error: 'Customer not found' });
+
+    const ordersRes = await db.query(
+      `SELECT o.id, o.restaurant_id, o.status, o.subtotal, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.created_at,
+              t.number AS table_number,
+              COALESCE(
+                json_agg(
+                  json_build_object(
+                    'quantity', oi.quantity,
+                    'price', oi.price_at_order,
+                    'item_name', mi.name
+                  )
+                ) FILTER (WHERE oi.id IS NOT NULL), '[]'
+              ) AS items
+       FROM orders o
+       LEFT JOIN tables t ON o.table_id = t.id
+       LEFT JOIN order_items oi ON o.id = oi.order_id
+       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       WHERE o.customer_id = $1
+       GROUP BY o.id, t.number
+       ORDER BY o.created_at DESC`,
+      [customerId]
+    );
+
+    res.json({
+      customer: custRes.rows[0],
+      orders: ordersRes.rows.map(o => ({
+        ...o,
+        subtotal: parseFloat(o.subtotal || o.total),
+        tax_amount: parseFloat(o.tax_amount || 0),
+        total: parseFloat(o.total)
+      }))
+    });
+  } catch (err) {
+    console.error('Customer history error:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ----- Comprehensive Analytics Dashboard -----
+router.get('/analytics/overview', async (req, res) => {
   const { restaurantId } = req.query;
   try {
     const params = restaurantId ? [restaurantId] : [];
     const restFilter = restaurantId ? `WHERE restaurant_id = $1` : '';
+    const orderRestFilter = restaurantId ? `AND o.restaurant_id = $1` : '';
 
-    // 1. Today's sales and order count
-    const todaySalesQuery = `
+    // 1. Today's performance (revenue, customer count, taxes, AOV)
+    const todayQuery = `
       SELECT 
-        COUNT(id) AS total_orders,
-        COALESCE(SUM(total), 0) AS total_revenue
+        COUNT(DISTINCT id) AS total_orders,
+        COUNT(DISTINCT customer_id) AS unique_customers,
+        COALESCE(SUM(subtotal), 0) AS total_subtotal,
+        COALESCE(SUM(tax_amount), 0) AS total_tax_collected,
+        COALESCE(SUM(total), 0) AS total_revenue,
+        COALESCE(ROUND(AVG(total), 2), 0) AS average_order_value
       FROM orders
       ${restFilter ? restFilter + ' AND' : 'WHERE'} created_at >= CURRENT_DATE
     `;
-    const todaySales = await db.query(todaySalesQuery, params);
+    const todayRes = await db.query(todayQuery, params);
 
-    // 2. Sales per table
+    // 2. Sales per table ranking (which table sales more)
     const tableSalesQuery = `
-      SELECT t.number AS table_number, COUNT(o.id) as orders_count, COALESCE(SUM(o.total), 0) as revenue
+      SELECT t.number AS table_number, 
+             t.id AS table_id,
+             COUNT(o.id) AS orders_count, 
+             COALESCE(SUM(o.total), 0) AS revenue,
+             ROUND(COALESCE(AVG(o.total), 0), 2) AS avg_spend_per_table
       FROM orders o
       JOIN tables t ON o.table_id = t.id
-      ${restaurantId ? 'WHERE o.restaurant_id = $1' : ''}
-      GROUP BY t.number
+      WHERE 1=1 ${orderRestFilter}
+      GROUP BY t.number, t.id
       ORDER BY revenue DESC
     `;
     const tableSales = await db.query(tableSalesQuery, params);
 
-    // 3. Top-selling dishes
+    // 3. Hourly order rush breakdown for today
+    const hourlyQuery = `
+      SELECT 
+        TO_CHAR(created_at, 'HH24:00') AS hour_slot,
+        COUNT(id) AS order_count,
+        COALESCE(SUM(total), 0) AS revenue
+      FROM orders
+      ${restFilter ? restFilter + ' AND' : 'WHERE'} created_at >= CURRENT_DATE
+      GROUP BY hour_slot
+      ORDER BY hour_slot ASC
+    `;
+    const hourlyRes = await db.query(hourlyQuery, params);
+
+    // 4. Sales by payment method (CASH, UPI, CARD)
+    const paymentMethodQuery = `
+      SELECT COALESCE(o.payment_method, 'CASH') AS method,
+             COUNT(o.id) AS count,
+             COALESCE(SUM(o.total), 0) AS total_amount
+      FROM orders o
+      WHERE o.status = 'PAID' ${orderRestFilter}
+      GROUP BY o.payment_method
+      ORDER BY total_amount DESC
+    `;
+    const paymentRes = await db.query(paymentMethodQuery, params);
+
+    // 5. Top 5 selling dishes
     const topDishesQuery = `
-      SELECT mi.name, SUM(oi.quantity) as quantity_sold, SUM(oi.quantity * oi.price_at_order) as revenue
+      SELECT mi.name, mi.category,
+             SUM(oi.quantity) AS quantity_sold, 
+             SUM(oi.quantity * oi.price_at_order) AS revenue
       FROM order_items oi
       JOIN menu_items mi ON oi.menu_item_id = mi.id
       JOIN orders o ON oi.order_id = o.id
-      ${restaurantId ? 'WHERE o.restaurant_id = $1' : ''}
-      GROUP BY mi.name
+      WHERE 1=1 ${orderRestFilter}
+      GROUP BY mi.name, mi.category
       ORDER BY quantity_sold DESC
       LIMIT 5
     `;
     const topDishes = await db.query(topDishesQuery, params);
 
     res.json({
-      today: todaySales.rows[0],
-      salesByTable: tableSales.rows,
-      topSellingDishes: topDishes.rows
+      today: {
+        totalOrders: parseInt(todayRes.rows[0].total_orders, 10),
+        uniqueCustomers: parseInt(todayRes.rows[0].unique_customers, 10),
+        totalSubtotal: parseFloat(todayRes.rows[0].total_subtotal),
+        totalTaxCollected: parseFloat(todayRes.rows[0].total_tax_collected),
+        totalRevenue: parseFloat(todayRes.rows[0].total_revenue),
+        averageOrderValue: parseFloat(todayRes.rows[0].average_order_value)
+      },
+      salesByTable: tableSales.rows.map(r => ({
+        tableNumber: r.table_number,
+        ordersCount: parseInt(r.orders_count, 10),
+        revenue: parseFloat(r.revenue),
+        avgSpend: parseFloat(r.avg_spend_per_table)
+      })),
+      hourlySales: hourlyRes.rows.map(r => ({
+        hour: r.hour_slot,
+        orderCount: parseInt(r.order_count, 10),
+        revenue: parseFloat(r.revenue)
+      })),
+      paymentBreakdown: paymentRes.rows.map(r => ({
+        method: r.method,
+        count: parseInt(r.count, 10),
+        amount: parseFloat(r.total_amount)
+      })),
+      topSellingDishes: topDishes.rows.map(r => ({
+        name: r.name,
+        category: r.category,
+        quantitySold: parseInt(r.quantity_sold, 10),
+        revenue: parseFloat(r.revenue)
+      }))
     });
   } catch (err) {
-    console.error('Analytics error:', err);
-    res.status(500).json({ error: 'Failed to fetch analytics' });
+    console.error('Analytics overview error:', err);
+    res.status(500).json({ error: 'Failed to fetch analytics overview' });
   }
+});
+
+// Legacy backward compatibility alias for summary
+router.get('/analytics/summary', async (req, res) => {
+  req.url = '/analytics/overview';
+  router.handle(req, res);
 });
 
 module.exports = router;

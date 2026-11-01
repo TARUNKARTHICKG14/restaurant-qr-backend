@@ -23,23 +23,57 @@ async function upsertCustomer({ name, phone, consentGiven }) {
   }
 }
 
+// Helper to compute subtotal, restaurant tax percentage, tax amount, and grand total
+async function recalculateOrderTotals(orderId, restaurantId) {
+  // 1. Fetch restaurant tax percentage and currency
+  const restRes = await db.query('SELECT tax_percentage, currency FROM restaurants WHERE id = $1', [restaurantId]);
+  const taxPercentage = restRes.rowCount > 0 && restRes.rows[0].tax_percentage != null
+    ? parseFloat(restRes.rows[0].tax_percentage)
+    : 5.0;
+  const currency = restRes.rowCount > 0 && restRes.rows[0].currency ? restRes.rows[0].currency : '₹';
+
+  // 2. Compute subtotal from order_items
+  const sumRes = await db.query(
+    `SELECT COALESCE(SUM(quantity * price_at_order), 0) AS subtotal 
+     FROM order_items WHERE order_id = $1`,
+    [orderId]
+  );
+  const subtotal = parseFloat(sumRes.rows[0].subtotal);
+  const taxAmount = Math.round((subtotal * (taxPercentage / 100)) * 100) / 100;
+  const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
+
+  // 3. Update orders record
+  await db.query(
+    `UPDATE orders 
+     SET subtotal = $1, tax_percentage = $2, tax_amount = $3, total = $4, updated_at = now() 
+     WHERE id = $5`,
+    [subtotal, taxPercentage, taxAmount, grandTotal, orderId]
+  );
+
+  return { subtotal, taxPercentage, taxAmount, grandTotal, currency };
+}
+
 // GET /api/order/table/:tableId/session
 // Checks if the table currently has an active (unpaid) order session
 router.get('/table/:tableId/session', async (req, res) => {
   const { tableId } = req.params;
 
   try {
-    const tableRes = await db.query('SELECT id, number FROM tables WHERE id = $1', [tableId]);
+    const tableRes = await db.query('SELECT id, number, restaurant_id FROM tables WHERE id = $1', [tableId]);
     if (tableRes.rowCount === 0) {
       return res.status(404).json({ error: 'Table not found' });
     }
 
+    const table = tableRes.rows[0];
+
     // Find active order for this table that is NOT paid or cancelled
     const activeOrderRes = await db.query(
-      `SELECT o.id, o.restaurant_id, o.status, o.total, o.created_at, o.updated_at,
-              c.name AS customer_name, c.phone AS customer_phone
+      `SELECT o.id, o.restaurant_id, o.status, o.subtotal, o.tax_percentage, o.tax_amount, o.total, o.payment_method, o.notes, o.created_at, o.updated_at,
+              c.name AS customer_name, c.phone AS customer_phone,
+              r.currency
        FROM orders o
        LEFT JOIN customers c ON o.customer_id = c.id
+       LEFT JOIN restaurants r ON o.restaurant_id = r.id
        WHERE o.table_id = $1 AND o.status NOT IN ('PAID', 'CANCELLED')
        ORDER BY o.created_at DESC
        LIMIT 1`,
@@ -49,7 +83,7 @@ router.get('/table/:tableId/session', async (req, res) => {
     if (activeOrderRes.rowCount === 0) {
       return res.json({
         hasActiveSession: false,
-        table: tableRes.rows[0]
+        table: { id: table.id, number: table.number }
       });
     }
 
@@ -57,7 +91,7 @@ router.get('/table/:tableId/session', async (req, res) => {
 
     // Fetch line items for this active order
     const itemsRes = await db.query(
-      `SELECT oi.id, oi.quantity, oi.price_at_order, mi.name AS item_name, mi.description
+      `SELECT oi.id, oi.quantity, oi.price_at_order, mi.name AS item_name, mi.category, mi.description
        FROM order_items oi
        JOIN menu_items mi ON oi.menu_item_id = mi.id
        WHERE oi.order_id = $1
@@ -67,17 +101,27 @@ router.get('/table/:tableId/session', async (req, res) => {
 
     return res.json({
       hasActiveSession: true,
-      table: tableRes.rows[0],
+      table: { id: table.id, number: table.number },
       orderId: order.id,
       restaurantId: order.restaurant_id,
       status: order.status,
+      notes: order.notes,
+      currency: order.currency || '₹',
+      subtotal: parseFloat(order.subtotal || order.total),
+      taxPercentage: parseFloat(order.tax_percentage || 5.0),
+      taxAmount: parseFloat(order.tax_amount || 0),
       total: parseFloat(order.total),
+      paymentMethod: order.payment_method,
       createdAt: order.created_at,
       customer: {
         name: order.customer_name,
         phone: order.customer_phone
       },
-      items: itemsRes.rows
+      items: itemsRes.rows.map(it => ({
+        ...it,
+        price_at_order: parseFloat(it.price_at_order),
+        line_total: parseFloat(it.price_at_order) * it.quantity
+      }))
     });
   } catch (err) {
     console.error('Check table session error:', err);
@@ -112,11 +156,13 @@ router.post('/', async (req, res) => {
 
   try {
     const [restRes, tableRes] = await Promise.all([
-      db.query('SELECT id FROM restaurants WHERE id = $1', [restaurantId]),
+      db.query('SELECT id, tax_percentage FROM restaurants WHERE id = $1', [restaurantId]),
       db.query('SELECT id FROM tables WHERE id = $1', [tableId]),
     ]);
     if (restRes.rowCount === 0) return res.status(404).json({ error: 'Restaurant not found' });
     if (tableRes.rowCount === 0) return res.status(404).json({ error: 'Table not found' });
+
+    const taxPercentage = restRes.rows[0].tax_percentage != null ? parseFloat(restRes.rows[0].tax_percentage) : 5.0;
 
     // Check if there is already an active session order at this table
     const existingOrderRes = await db.query(
@@ -130,20 +176,21 @@ router.post('/', async (req, res) => {
     let isExistingSession = false;
 
     if (existingOrderRes.rowCount > 0) {
-      // Append to the existing active order
       orderId = existingOrderRes.rows[0].id;
       isExistingSession = true;
+      if (notes) {
+        await db.query(`UPDATE orders SET notes = COALESCE(notes || '; ', '') || $1 WHERE id = $2`, [notes, orderId]);
+      }
     } else {
-      // Require customer details for a brand new session
       if (!customer) {
         return res.status(400).json({ error: 'Customer details (name, phone, consentGiven) are required for new table order' });
       }
       const customerId = await upsertCustomer(customer);
 
       const orderRes = await db.query(
-        `INSERT INTO orders (restaurant_id, table_id, customer_id, status, notes, total)
-         VALUES ($1, $2, $3, 'PENDING', $4, 0) RETURNING id, status, total, created_at`,
-        [restaurantId, tableId, customerId, notes || null]
+        `INSERT INTO orders (restaurant_id, table_id, customer_id, status, notes, subtotal, tax_percentage, tax_amount, total)
+         VALUES ($1, $2, $3, 'PENDING', $4, 0, $5, 0, 0) RETURNING id, status, created_at`,
+        [restaurantId, tableId, customerId, notes || null, taxPercentage]
       );
       orderId = orderRes.rows[0].id;
     }
@@ -160,21 +207,24 @@ router.post('/', async (req, res) => {
       );
     }
 
-    // Recalculate full total from all order_items
-    const totalRes = await db.query(
-      `SELECT COALESCE(SUM(quantity * price_at_order), 0) AS new_total 
-       FROM order_items WHERE order_id = $1`,
-      [orderId]
-    );
-    const total = parseFloat(totalRes.rows[0].new_total);
-    await db.query('UPDATE orders SET total = $1, updated_at = now() WHERE id = $2', [total, orderId]);
+    // Recalculate subtotal, tax, and total
+    const totals = await recalculateOrderTotals(orderId, restaurantId);
 
     // Emit realtime event to kitchen & table rooms
     try {
       const io = getIO();
       const eventName = isExistingSession ? 'order:items_added' : 'order:new';
-      io.emit(eventName, { orderId, tableId, status: isExistingSession ? existingOrderRes.rows[0].status : 'PENDING', total, isExistingSession });
-      io.to(`table_${tableId}`).emit('order:update', { orderId, total });
+      io.emit(eventName, {
+        orderId,
+        tableId,
+        status: isExistingSession ? existingOrderRes.rows[0].status : 'PENDING',
+        subtotal: totals.subtotal,
+        taxPercentage: totals.taxPercentage,
+        taxAmount: totals.taxAmount,
+        total: totals.grandTotal,
+        isExistingSession
+      });
+      io.to(`table_${tableId}`).emit('order:update', { orderId, total: totals.grandTotal });
     } catch (e) {
       console.warn('Socket.IO emit warning:', e.message);
     }
@@ -182,7 +232,11 @@ router.post('/', async (req, res) => {
     res.status(201).json({
       orderId,
       status: isExistingSession ? existingOrderRes.rows[0].status : 'PENDING',
-      total,
+      subtotal: totals.subtotal,
+      taxPercentage: totals.taxPercentage,
+      taxAmount: totals.taxAmount,
+      total: totals.grandTotal,
+      currency: totals.currency,
       isExistingSession
     });
   } catch (err) {
@@ -244,20 +298,14 @@ router.post('/:id/items', async (req, res) => {
       });
     }
 
-    // Recompute total
-    const totalRes = await db.query(
-      `SELECT COALESCE(SUM(quantity * price_at_order), 0) AS new_total 
-       FROM order_items WHERE order_id = $1`,
-      [orderId]
-    );
-    const total = parseFloat(totalRes.rows[0].new_total);
-    await db.query('UPDATE orders SET total = $1, updated_at = now() WHERE id = $2', [total, orderId]);
+    // Recompute subtotal, tax and total
+    const totals = await recalculateOrderTotals(orderId, order.restaurant_id);
 
     // Emit realtime event
     try {
       const io = getIO();
-      io.emit('order:items_added', { orderId, tableId: order.table_id, addedItems, total });
-      io.to(`table_${order.table_id}`).emit('order:update', { orderId, total });
+      io.emit('order:items_added', { orderId, tableId: order.table_id, addedItems, total: totals.grandTotal });
+      io.to(`table_${order.table_id}`).emit('order:update', { orderId, total: totals.grandTotal });
     } catch (e) {
       console.warn('Socket.IO emit warning:', e.message);
     }
@@ -266,7 +314,11 @@ router.post('/:id/items', async (req, res) => {
       message: 'Items added successfully',
       orderId,
       tableId: order.table_id,
-      total,
+      subtotal: totals.subtotal,
+      taxPercentage: totals.taxPercentage,
+      taxAmount: totals.taxAmount,
+      total: totals.grandTotal,
+      currency: totals.currency,
       addedItems
     });
   } catch (err) {
@@ -278,14 +330,19 @@ router.post('/:id/items', async (req, res) => {
 // PUT /api/order/:id/dismiss – dismiss/settle order (clears table session)
 router.put('/:id/dismiss', async (req, res) => {
   const { id: orderId } = req.params;
+  const schema = Joi.object({
+    paymentMethod: Joi.string().valid('CASH', 'UPI', 'CARD', 'ONLINE').default('CASH')
+  });
+  const { value } = schema.validate(req.body || {});
+  const paymentMethod = value ? value.paymentMethod || 'CASH' : 'CASH';
 
   try {
     const result = await db.query(
       `UPDATE orders 
-       SET status = 'PAID', updated_at = now() 
-       WHERE id = $1 
-       RETURNING id, table_id, total, status`,
-      [orderId]
+       SET status = 'PAID', payment_method = $1, updated_at = now() 
+       WHERE id = $2 
+       RETURNING id, table_id, subtotal, tax_percentage, tax_amount, total, payment_method, status`,
+      [paymentMethod, orderId]
     );
 
     if (result.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
@@ -295,7 +352,7 @@ router.put('/:id/dismiss', async (req, res) => {
     // Emit realtime event to notify table and cashier
     try {
       const io = getIO();
-      io.emit('order:dismissed', { orderId, tableId: order.table_id, status: 'PAID' });
+      io.emit('order:dismissed', { orderId, tableId: order.table_id, paymentMethod, status: 'PAID' });
       io.to(`table_${order.table_id}`).emit('session:ended', { orderId, message: 'Table bill settled. Thank you!' });
     } catch (e) {
       console.warn('Socket.IO emit warning:', e.message);
@@ -303,7 +360,12 @@ router.put('/:id/dismiss', async (req, res) => {
 
     res.json({
       message: 'Order dismissed and marked as PAID. Table is now free for next customer.',
-      order
+      order: {
+        ...order,
+        subtotal: parseFloat(order.subtotal),
+        tax_amount: parseFloat(order.tax_amount),
+        total: parseFloat(order.total)
+      }
     });
   } catch (err) {
     console.error('Dismiss order error:', err);
@@ -332,7 +394,7 @@ router.put('/:id/status', async (req, res) => {
     } catch (e) {
       console.warn('Socket.IO emit warning:', e.message);
     }
-    res.json({ orderId: id, status, total });
+    res.json({ orderId: id, status, total: parseFloat(total) });
   } catch (err) {
     console.error('Update status error:', err);
     res.status(500).json({ error: 'Database error' });
@@ -347,13 +409,20 @@ router.get('/:id', async (req, res) => {
     if (orderRes.rowCount === 0) return res.status(404).json({ error: 'Order not found' });
     const order = orderRes.rows[0];
     const itemsRes = await db.query(
-      `SELECT oi.id, oi.quantity, oi.price_at_order, mi.name, mi.description
+      `SELECT oi.id, oi.quantity, oi.price_at_order, mi.name, mi.category, mi.description
        FROM order_items oi
        JOIN menu_items mi ON oi.menu_item_id = mi.id
        WHERE oi.order_id = $1`,
       [id]
     );
-    order.items = itemsRes.rows;
+    order.items = itemsRes.rows.map(it => ({
+      ...it,
+      price_at_order: parseFloat(it.price_at_order),
+      line_total: parseFloat(it.price_at_order) * it.quantity
+    }));
+    order.subtotal = parseFloat(order.subtotal || order.total);
+    order.tax_amount = parseFloat(order.tax_amount || 0);
+    order.total = parseFloat(order.total);
     res.json(order);
   } catch (err) {
     console.error('Get order error:', err);

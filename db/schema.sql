@@ -73,4 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 -- Backward-compatible column additions for existing installations
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Main Course';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tax_percentage NUMERIC(5,2) DEFAULT 5.0;
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT '₹';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_percentage NUMERIC(5,2) DEFAULT 5.0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'CASH';
 
