@@ -12,7 +12,7 @@ router.get('/tickets', async (req, res) => {
 
   try {
     let query = `
-      SELECT o.id AS order_id, o.restaurant_id, o.status, o.notes, o.created_at, o.updated_at,
+      SELECT o.id AS id, o.id AS order_id, o.restaurant_id, o.status, o.notes, o.created_at, o.updated_at,
              ROUND(EXTRACT(EPOCH FROM (now() - o.created_at)) / 60) AS elapsed_minutes,
              t.number AS table_number, t.id AS table_id,
              c.name AS customer_name,
@@ -45,6 +45,8 @@ router.get('/tickets', async (req, res) => {
     const result = await db.query(query, params);
     const tickets = result.rows.map(ticket => ({
       ...ticket,
+      id: ticket.id || ticket.order_id,
+      order_id: ticket.order_id || ticket.id,
       elapsed_minutes: parseInt(ticket.elapsed_minutes, 10) || 0
     }));
 
@@ -68,6 +70,10 @@ router.get('/tickets', async (req, res) => {
 // Progresses ticket to the next stage: PENDING -> PREPARING -> READY -> SERVED
 router.put('/tickets/:id/advance', async (req, res) => {
   const { id: orderId } = req.params;
+
+  if (!orderId || orderId === 'undefined' || orderId === 'null') {
+    return res.status(400).json({ error: 'Valid Order ID is required' });
+  }
 
   try {
     const orderRes = await db.query('SELECT id, status, table_id, restaurant_id FROM orders WHERE id = $1', [orderId]);
