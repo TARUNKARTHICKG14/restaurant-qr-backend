@@ -11,14 +11,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
  * On failure, responds with 401.
  */
 function verifyToken(req, res, next) {
+  let token;
   const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.status(401).json({ error: 'Missing Authorization header' });
-
-  const parts = authHeader.split(' ');
-  if (parts.length !== 2 || parts[0] !== 'Bearer') {
-    return res.status(401).json({ error: 'Invalid Authorization format' });
+  if (authHeader) {
+    const parts = authHeader.split(' ');
+    if (parts.length === 2 && parts[0] === 'Bearer') {
+      token = parts[1];
+    } else {
+      return res.status(401).json({ error: 'Invalid Authorization format' });
+    }
+  } else if (req.query && req.query.token) {
+    token = req.query.token;
   }
-  const token = parts[1];
+
+  if (!token) return res.status(401).json({ error: 'Missing Authorization header' });
+
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload; // e.g., { adminId, email }

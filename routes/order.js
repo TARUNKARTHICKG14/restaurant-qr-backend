@@ -109,9 +109,9 @@ router.get('/tables/default', async (req, res) => {
   }
 });
 
-// GET /api/order/table/:tableId/session
+// GET /api/order/table/:tableId/session or /api/order/tables/:tableId/session
 // Checks if the table currently has an active (unpaid) order session
-router.get('/table/:tableId/session', async (req, res) => {
+router.get(['/table/:tableId/session', '/tables/:tableId/session'], async (req, res) => {
   const { tableId } = req.params;
 
   try {
@@ -389,10 +389,11 @@ router.post('/:id/items', async (req, res) => {
 router.put('/:id/dismiss', async (req, res) => {
   const { id: orderId } = req.params;
   const schema = Joi.object({
-    paymentMethod: Joi.string().valid('CASH', 'UPI', 'CARD', 'ONLINE').default('CASH')
+    paymentMethod: Joi.string().valid('CASH', 'UPI', 'CARD', 'ONLINE'),
+    payment_method: Joi.string().valid('CASH', 'UPI', 'CARD', 'ONLINE')
   });
   const { value } = schema.validate(req.body || {});
-  const paymentMethod = value ? value.paymentMethod || 'CASH' : 'CASH';
+  const paymentMethod = (value && (value.paymentMethod || value.payment_method)) || 'CASH';
 
   try {
     const result = await db.query(
