@@ -53,7 +53,8 @@ router.get('/tickets', async (req, res) => {
       pending: tickets.filter(t => t.status === 'PENDING'),
       preparing: tickets.filter(t => t.status === 'PREPARING'),
       ready: tickets.filter(t => t.status === 'READY'),
-      totalActiveTickets: tickets.length
+      totalActiveTickets: tickets.length,
+      tickets
     };
 
     res.json(grouped);
@@ -102,13 +103,16 @@ router.put('/tickets/:id/advance', async (req, res) => {
     // Emit real-time kitchen broadcast with audio chime trigger
     try {
       const io = getIO();
-      io.emit('kitchen:ticket_advanced', {
+      const advancePayload = {
         orderId,
         tableId: updatedOrder.table_id,
         previousStatus: currentStatus,
         newStatus: nextStatus,
+        status: nextStatus,
         playChime: nextStatus === 'READY' // Alert runner/waiter that food is ready for delivery
-      });
+      };
+      io.emit('kitchen:ticket_advanced', advancePayload);
+      io.emit('order:status_updated', advancePayload);
       io.to(`table_${updatedOrder.table_id}`).emit('order:update', {
         orderId,
         status: nextStatus
