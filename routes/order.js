@@ -547,14 +547,18 @@ router.post('/table/:tableId/call-waiter', async (req, res) => {
   const schema = Joi.object({
     requestType: Joi.string()
       .valid('CALL_WAITER', 'WATER', 'BILL', 'CUTLERY', 'CLEAN_TABLE', 'CUSTOM')
-      .default('CALL_WAITER'),
+      .optional(),
+    request_type: Joi.string()
+      .valid('CALL_WAITER', 'WATER', 'BILL', 'CUTLERY', 'CLEAN_TABLE', 'CUSTOM')
+      .optional(),
     note: Joi.string().allow('', null).optional()
   });
 
   const { error, value } = schema.validate(req.body || {});
   if (error) return res.status(400).json({ error: error.details[0].message });
 
-  const { requestType, note } = value;
+  const requestType = value.requestType || value.request_type || 'CALL_WAITER';
+  const note = value.note || '';
 
   try {
     const tableRes = await db.query('SELECT id, number, restaurant_id FROM tables WHERE id = $1', [tableId]);
@@ -574,14 +578,23 @@ router.post('/table/:tableId/call-waiter', async (req, res) => {
     // Emit real-time notification to waiter / captain / cashier
     try {
       const io = getIO();
-      io.emit('waiter:call', {
+      const payload = {
         requestId: serviceRequest.id,
+        id: serviceRequest.id,
         tableId: table.id,
+        table_id: table.id,
         tableNumber: table.number,
+        table_number: table.number,
         requestType: serviceRequest.request_type,
+        request_type: serviceRequest.request_type,
+        note,
+        status: 'PENDING',
         createdAt: serviceRequest.created_at,
+        created_at: serviceRequest.created_at,
         playChime: true
-      });
+      };
+      io.emit('waiter:call', payload);
+      io.emit('service:requested', payload);
     } catch (e) {
       console.warn('Socket emit warning:', e.message);
     }

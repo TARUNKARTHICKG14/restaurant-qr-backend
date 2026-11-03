@@ -8,20 +8,22 @@ const { verifyToken } = require('../middleware/auth');
 // Simple static admin login – you can replace with Supabase Auth later
 router.post('/login', async (req, res) => {
   const schema = Joi.object({
-    email: Joi.string().email().required(),
+    email: Joi.string().optional(),
+    username: Joi.string().optional(),
     password: Joi.string().required(),
-  });
+  }).or('email', 'username');
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ error: error.details[0].message });
 
-  const { email, password } = value;
-  const adminEmail = process.env.ADMIN_EMAIL;
-  const adminPass = process.env.ADMIN_PASS;
-  if (email !== adminEmail || password !== adminPass) {
+  const inputUser = value.email || value.username;
+  const { password } = value;
+  const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
+  const adminPass = process.env.ADMIN_PASS || 'supersecret';
+  if ((inputUser !== adminEmail && inputUser !== 'admin') || password !== adminPass) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   const { issueToken } = require('../middleware/auth');
-  const token = issueToken({ email });
+  const token = issueToken({ email: adminEmail });
   res.json({ token });
 });
 
@@ -579,7 +581,9 @@ router.put('/service-requests/:id/resolve', async (req, res) => {
 
     try {
       const { getIO } = require('../socket');
-      getIO().emit('waiter:resolved', { requestId: id, tableId: resolved.table_id });
+      const payload = { requestId: id, id, tableId: resolved.table_id };
+      getIO().emit('waiter:resolved', payload);
+      getIO().emit('service:resolved', payload);
     } catch (e) {
       console.warn('Socket emit warning:', e.message);
     }
