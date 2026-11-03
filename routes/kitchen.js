@@ -22,6 +22,7 @@ router.get('/tickets', async (req, res) => {
                    'id', oi.id,
                    'quantity', oi.quantity,
                    'item_name', mi.name,
+                   'name', mi.name,
                    'category', mi.category
                  )
                ) FILTER (WHERE oi.id IS NOT NULL), '[]'

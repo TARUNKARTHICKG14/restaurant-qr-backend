@@ -155,9 +155,8 @@ router.get(['/table/:tableId/session', '/tables/:tableId/session'], async (req, 
       [order.id]
     );
 
-    return res.json({
-      hasActiveSession: true,
-      table: { id: table.id, number: table.number },
+    const orderPayload = {
+      id: order.id,
       orderId: order.id,
       restaurantId: order.restaurant_id,
       status: order.status,
@@ -169,17 +168,28 @@ router.get(['/table/:tableId/session', '/tables/:tableId/session'], async (req, 
       taxPercentage: parseFloat(order.tax_percentage || 5.0),
       taxAmount: parseFloat(order.tax_amount || 0),
       total: parseFloat(order.total),
+      total_amount: parseFloat(order.total),
       paymentMethod: order.payment_method,
       createdAt: order.created_at,
       customer: {
         name: order.customer_name,
         phone: order.customer_phone
       },
+      customer_name: order.customer_name,
+      customer_phone: order.customer_phone,
       items: itemsRes.rows.map(it => ({
         ...it,
+        name: it.item_name,
         price_at_order: parseFloat(it.price_at_order),
         line_total: parseFloat(it.price_at_order) * it.quantity
       }))
+    };
+
+    return res.json({
+      hasActiveSession: true,
+      table: { id: table.id, number: table.number },
+      ...orderPayload,
+      order: orderPayload
     });
   } catch (err) {
     console.error('Check table session error:', err);
